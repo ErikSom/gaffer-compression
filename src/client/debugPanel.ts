@@ -7,6 +7,10 @@ export interface DebugPanelParams {
 	bandwidthStep: number;
 }
 
+// Matches the server's RESET_COOLDOWN_MS — used only for button feedback; the
+// server is the authority that actually enforces the limit.
+const RESET_COOLDOWN_MS = 30_000;
+
 const PRESETS: Record<string, DebugPanelParams> = {
 	lan: { latencyMs: 0, jitterMs: 0, lossPct: 0, bandwidthStep: BANDWIDTH_STEPS.length - 1 },
 	broadband: { latencyMs: 30, jitterMs: 5, lossPct: 0, bandwidthStep: 8 },
@@ -24,6 +28,8 @@ export class DebugPanel {
 	public onReset: (() => void) | null = null;
 	public onGhostToggle: ((visible: boolean) => void) | null = null;
 	private visible = false;
+	private resetBtn: HTMLButtonElement | null = null;
+	private resetCooldownTimer: ReturnType<typeof setInterval> | null = null;
 
 	constructor() {
 		this.root = document.getElementById("debug")!;
@@ -53,7 +59,12 @@ export class DebugPanel {
 			});
 		}
 
-		document.getElementById("reset-boxes")?.addEventListener("click", () => this.onReset?.());
+		this.resetBtn = document.getElementById("reset-boxes") as HTMLButtonElement | null;
+		this.resetBtn?.addEventListener("click", () => {
+			if (this.resetBtn?.disabled) return;
+			this.onReset?.();
+			this.startResetCooldown();
+		});
 		document.getElementById("show-ghost")?.addEventListener("change", (e) => {
 			this.onGhostToggle?.((e.target as HTMLInputElement).checked);
 		});
@@ -95,6 +106,29 @@ export class DebugPanel {
 		for (const btn of Array.from(this.root.querySelectorAll<HTMLButtonElement>(".preset:not(#hz-buttons) button"))) {
 			btn.classList.toggle("active", btn.dataset.preset === k);
 		}
+	}
+
+	// Mirror the server's reset cooldown in the UI: disable the button and count
+	// down so a press reads as "wait" rather than silently doing nothing. The
+	// server enforces the real limit; this is just feedback for the clicker.
+	private startResetCooldown() {
+		const btn = this.resetBtn;
+		if (!btn) return;
+		if (this.resetCooldownTimer) clearInterval(this.resetCooldownTimer);
+		let remaining = Math.ceil(RESET_COOLDOWN_MS / 1000);
+		btn.disabled = true;
+		btn.textContent = `↺ Reset boxes (${remaining}s)`;
+		this.resetCooldownTimer = setInterval(() => {
+			remaining--;
+			if (remaining <= 0) {
+				clearInterval(this.resetCooldownTimer!);
+				this.resetCooldownTimer = null;
+				btn.disabled = false;
+				btn.textContent = "↺ Reset boxes";
+			} else {
+				btn.textContent = `↺ Reset boxes (${remaining}s)`;
+			}
+		}, 1000);
 	}
 
 	setActiveHz(hz: number) {

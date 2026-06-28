@@ -44,6 +44,10 @@ const PORT = Number(process.env.PORT) || 8787;
 // on only deepens the queue. Skip until it drains.
 const FLOW_CONTROL_MAX_BYTES = 128 * 1024;
 
+// "Reset boxes" resets the pile for *everyone*, so rate-limit it authoritatively
+// here — a client-side guard alone is trivially bypassed.
+const RESET_COOLDOWN_MS = 30_000;
+
 interface ClientRec {
 	id: number;
 	ws: WebSocket;
@@ -240,6 +244,7 @@ async function main() {
 
 	// Snap every box back to its starting pile position, at rest. Broadcast to all
 	// clients via the normal snapshot stream, so one player's reset resets for all.
+	let lastResetAt = 0;
 	const IDENTITY_ROT = { x: 0, y: 0, z: 0, w: 1 };
 	function resetBoxes() {
 		for (let i = 0; i < dynamicBodies.length; i++) {
@@ -407,7 +412,11 @@ async function main() {
 			} else if (msg.type === MsgType.SetHz) {
 				setPhysicsHz(msg.physicsHz);
 			} else if (msg.type === MsgType.ResetBoxes) {
-				resetBoxes();
+				const now = Date.now();
+				if (now - lastResetAt >= RESET_COOLDOWN_MS) {
+					lastResetAt = now;
+					resetBoxes();
+				} // else: still cooling down — ignore the spam
 			}
 		});
 
