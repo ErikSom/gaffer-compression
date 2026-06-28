@@ -41,6 +41,15 @@ See **[deploy/oracle-cloud.md](deploy/oracle-cloud.md)** for the full walkthroug
 
 Concurrent players are capped server-side by `MAX_PLAYERS` (currently 8).
 
+### Server → fly.io (easiest, paid)
+
+Fly runs the [`Dockerfile`](Dockerfile) directly, terminates TLS at its edge, and
+gives a `wss://<app>.fly.dev` hostname — no DNS, firewall, or Caddy to configure.
+It needs a **dedicated**-CPU machine (`performance-1x`), which is paid (~$0.04/hr,
+idling to ~$0 when empty via autostop). See **[deploy/fly.md](deploy/fly.md)**.
+Config is in [`fly.toml`](fly.toml). Keep it to a single machine — it's one shared
+world.
+
 ### Server → Render (free, but limited)
 
 A [`render.yaml`](render.yaml) Blueprint is also included. It's the simplest deploy

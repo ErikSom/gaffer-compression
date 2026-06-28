@@ -1,0 +1,39 @@
+# fly.io deploy for the game server. Fly's edge terminates TLS and gives a
+# wss://<app>.fly.dev hostname, so no Caddy is needed here (unlike the VPS/Oracle
+# setup). Builds the repo Dockerfile. See deploy/fly.md for the full walkthrough.
+#
+# IMPORTANT: this is a single-shared-world server — keep it to ONE machine
+# (`fly scale count 1`). Multiple machines would each run a separate, divergent
+# simulation and split players across them.
+
+app = "gaffer-compression-server" # must be globally unique — change if taken
+primary_region = "fra"            # Frankfurt; pick the region nearest your players
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8787"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  # Idle to ~$0 when empty, wake on the next connection (a few seconds — the
+  # client's loading overlay covers it). Set min_machines_running = 1 instead for
+  # always-on / no cold start.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    # Connection-based: the server itself caps players at MAX_PLAYERS (8); these
+    # generous limits just stop fly from rejecting legitimate connections. Do NOT
+    # let this trigger autoscaling — keep the app at one machine (see note above).
+    type = "connections"
+    soft_limit = 20
+    hard_limit = 25
+
+[[vm]]
+  size = "performance-1x" # 1 DEDICATED vCPU, 2GB — handles 4096 bodies @ 40Hz.
+  # Do not use a shared-cpu size: this workload pins a core continuously and would
+  # be throttled, the same failure mode as the Render free tier.
