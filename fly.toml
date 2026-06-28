@@ -1,11 +1,3 @@
-# fly.io deploy for the game server. Fly's edge terminates TLS and gives a
-# wss://<app>.fly.dev hostname, so no Caddy is needed here (unlike the VPS/Oracle
-# setup). Builds the repo Dockerfile. See deploy/fly.md for the full walkthrough.
-#
-# IMPORTANT: this is a single-shared-world server — keep it to ONE machine
-# (`fly scale count 1`). Multiple machines would each run a separate, divergent
-# simulation and split players across them.
-
 app = "gaffer-compression" # must be globally unique — change if taken
 primary_region = "fra"            # Frankfurt; pick the region nearest your players
 
