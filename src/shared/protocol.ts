@@ -26,29 +26,31 @@ export interface WelcomeMsg { type: MsgType.Welcome; playerId: number; objectCou
 export interface AckMsg { type: MsgType.Ack; frame: number; }
 export interface InputMsg { type: MsgType.Input; seq: number; move: { x: number; y: number; z: number }; }
 
-// Header layout (little-endian): u8 type, u32 frame, [u32 baseFrame for deltas].
+// Header layout (little-endian): u8 type, u32 frame, u16 lastProcessedInputSeq,
+// [u32 baseFrame for deltas].
 // 32-bit frames match the 31-bit monotonic frame ids and never wrap in practice.
-const FULL_HEADER_BYTES = 5;
-const DELTA_HEADER_BYTES = 9;
+const FULL_HEADER_BYTES = 7;
+const DELTA_HEADER_BYTES = 11;
 
-export function packFullSnapshot(frame: number): ArrayBuffer {
+export function packFullSnapshot(frame: number, lastProcessedInputSeq = 0): ArrayBuffer {
 	const payload = collectFullSnapshot(frame);
-	return prependHeader(MsgType.FullSnapshot, frame, 0, payload);
+	return prependHeader(MsgType.FullSnapshot, frame, 0, lastProcessedInputSeq, payload);
 }
 
-export function packDeltaSnapshot(frame: number, baseFrame: number): ArrayBuffer {
+export function packDeltaSnapshot(frame: number, baseFrame: number, lastProcessedInputSeq = 0): ArrayBuffer {
 	const payload = collectRelativeSnapshot(frame, baseFrame);
-	return prependHeader(MsgType.DeltaSnapshot, frame, baseFrame, payload);
+	return prependHeader(MsgType.DeltaSnapshot, frame, baseFrame, lastProcessedInputSeq, payload);
 }
 
-function prependHeader(type: MsgType, frame: number, baseFrame: number, payload: ArrayBuffer): ArrayBuffer {
+function prependHeader(type: MsgType, frame: number, baseFrame: number, lastProcessedInputSeq: number, payload: ArrayBuffer): ArrayBuffer {
 	const hasBase = type === MsgType.DeltaSnapshot;
 	const headerBytes = hasBase ? DELTA_HEADER_BYTES : FULL_HEADER_BYTES;
 	const out = new ArrayBuffer(headerBytes + payload.byteLength);
 	const view = new DataView(out);
 	view.setUint8(0, type);
 	view.setUint32(1, frame, true);
-	if (hasBase) view.setUint32(5, baseFrame, true);
+	view.setUint16(5, lastProcessedInputSeq, true);
+	if (hasBase) view.setUint32(7, baseFrame, true);
 
 	const payloadView = new Uint8Array(payload);
 	new Uint8Array(out, headerBytes).set(payloadView);
@@ -59,6 +61,7 @@ export interface DecodedSnapshot {
 	type: MsgType.FullSnapshot | MsgType.DeltaSnapshot;
 	frame: number;
 	baseFrame: number;
+	lastProcessedInputSeq: number;
 	state: NetworkBodyState[];
 }
 
@@ -68,19 +71,21 @@ export function decodePacket(buffer: ArrayBuffer): DecodedSnapshot | { type: Msg
 
 	if (type === MsgType.FullSnapshot) {
 		const frame = view.getUint32(1, true);
+		const lastProcessedInputSeq = view.getUint16(5, true);
 		const payload = buffer.slice(FULL_HEADER_BYTES);
 		const state = getNetworkStateFromFullSnapshot(payload);
 		networkCache.networkStates[frame] = state;
-		return { type, frame, baseFrame: 0, state };
+		return { type, frame, baseFrame: 0, lastProcessedInputSeq, state };
 	}
 
 	if (type === MsgType.DeltaSnapshot) {
 		const frame = view.getUint32(1, true);
-		const baseFrame = view.getUint32(5, true);
+		const lastProcessedInputSeq = view.getUint16(5, true);
+		const baseFrame = view.getUint32(7, true);
 		if (!networkCache.networkStates[baseFrame]) return null;
 		const payload = buffer.slice(DELTA_HEADER_BYTES);
 		const state = getNetworkStateFromRelativeSnapshot(payload, baseFrame);
-		return { type, frame, baseFrame, state };
+		return { type, frame, baseFrame, lastProcessedInputSeq, state };
 	}
 
 	if (type === MsgType.Ack) {

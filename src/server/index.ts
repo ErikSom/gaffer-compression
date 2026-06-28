@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import RAPIER from "@dimforge/rapier3d-compat";
 import { Quaternion, Vector3 } from "three";
-import { networkCache } from "../network/networkState.js";
+import { networkCache, pruneNetworkCacheBefore } from "../network/networkState.js";
 import type { NetworkBodyState } from "../network/networkInterfaces.js";
 import {
 	MsgType,
@@ -32,6 +32,7 @@ import {
 	PLAYER_FRICTION,
 } from "../shared/sceneConfig.js";
 import settings from "../settings.js";
+import { hasFreshInput, impulseScaleForHz, isNewerInputSeq, newestFrame } from "./simulationControls.js";
 
 const PORT = 8787;
 
@@ -46,7 +47,9 @@ interface ClientRec {
 	slot: number;
 	body: RAPIER.RigidBody;
 	lastAckedFrame: number | null;
+	lastInputSeq: number | null;
 	input: { x: number; z: number };
+	lastInputAt: number;
 	removed: boolean;
 }
 
@@ -203,9 +206,14 @@ async function main() {
 	// impulses each step, so this behaves like a steady force. (addForce/addTorque
 	// are *persistent* and would accumulate every tick — that ramping force was
 	// what rocketed the ball off-world.)
-	const impulseScale = 1 / settings.physicsHz;
-	function applyInputs() {
+	function applyInputs(now: number) {
+		const impulseScale = impulseScaleForHz(physicsHz);
 		for (const c of clients.values()) {
+			if (!hasFreshInput(c.lastInputAt, now)) {
+				c.input.x = 0;
+				c.input.z = 0;
+				continue;
+			}
 			const { x, z } = c.input;
 			if (x !== 0 || z !== 0) {
 				// Push + roll the ball; it plows the boxes by sheer mass.
@@ -243,8 +251,7 @@ async function main() {
 
 	function cleanupOldFrames(currentFrame: number) {
 		const cutoff = currentFrame - settings.snapshotHistory;
-		for (const k in networkCache.networkStates) if ((k as unknown as number) < cutoff) delete networkCache.networkStates[k];
-		for (const k in networkCache.relativeNetworkSnapshots) if ((k as unknown as number) < cutoff) delete networkCache.relativeNetworkSnapshots[k];
+		pruneNetworkCacheBefore(cutoff);
 	}
 
 	// Physics steps at physicsHz; state is collected + broadcast at snapshotHz.
@@ -261,18 +268,18 @@ async function main() {
 		// Build the full snapshot lazily — only a freshly-joined client (no valid
 		// ack) needs it. In steady state every client gets a small delta, so the
 		// ~4097-object full serialization is skipped entirely.
-		let fullBuf: ArrayBuffer | null = null;
 		for (const c of clients.values()) {
 			if (c.ws.readyState !== WebSocket.OPEN) continue;
 			if (c.ws.bufferedAmount > FLOW_CONTROL_MAX_BYTES) continue; // backed up → let it drain
 			let buf: ArrayBuffer | null = null;
 			const ack = c.lastAckedFrame;
 			if (ack !== null && networkCache.networkStates[ack] !== undefined) {
-				try { buf = packDeltaSnapshot(currentFrame, ack); } catch { buf = null; }
+				try { buf = packDeltaSnapshot(currentFrame, ack, c.lastInputSeq ?? 0); } catch { buf = null; }
 			}
 			if (buf === null) {
-				if (fullBuf === null) fullBuf = packFullSnapshot(currentFrame);
-				buf = fullBuf;
+				// The compressed full payload is cached underneath, but the header is
+				// client-specific because it echoes that client's latest input seq.
+				buf = packFullSnapshot(currentFrame, c.lastInputSeq ?? 0);
 			}
 			try {
 				c.ws.send(buf, { binary: true });
@@ -281,8 +288,8 @@ async function main() {
 		}
 	}
 
-	function stepOnce() {
-		applyInputs();
+	function stepOnce(now: number) {
+		applyInputs(now);
 		world.step();
 		frame = (frame + 1) & settings.maxPackageId;
 		if ((frame & 63) === 0) recycleStrayBodies();
@@ -314,7 +321,7 @@ async function main() {
 
 		let steps = 0;
 		while (accumulator >= physicsDt && steps < MAX_CATCHUP_STEPS) {
-			stepOnce();
+			stepOnce(now);
 			accumulator -= physicsDt;
 			steps++;
 		}
@@ -363,7 +370,7 @@ async function main() {
 		const body = spawnPlayerBody(slot);
 		playerBodies[slot] = body;
 		const id = nextClientId++;
-		const rec: ClientRec = { id, ws, slot, body, lastAckedFrame: null, input: { x: 0, z: 0 }, removed: false };
+		const rec: ClientRec = { id, ws, slot, body, lastAckedFrame: null, lastInputSeq: null, input: { x: 0, z: 0 }, lastInputAt: 0, removed: false };
 		clients.set(id, rec);
 
 		ws.binaryType = "arraybuffer";
@@ -378,10 +385,13 @@ async function main() {
 			const msg = decodePacket(buf as ArrayBuffer);
 			if (!msg) return;
 			if (msg.type === MsgType.Ack) {
-				rec.lastAckedFrame = msg.frame;
+				rec.lastAckedFrame = newestFrame(rec.lastAckedFrame, msg.frame);
 			} else if (msg.type === MsgType.Input) {
+				if (!isNewerInputSeq(rec.lastInputSeq, msg.seq)) return;
+				rec.lastInputSeq = msg.seq;
 				rec.input.x = msg.move.x;
 				rec.input.z = msg.move.z;
+				rec.lastInputAt = Date.now();
 			} else if (msg.type === MsgType.SetHz) {
 				setPhysicsHz(msg.physicsHz);
 			} else if (msg.type === MsgType.ResetBoxes) {

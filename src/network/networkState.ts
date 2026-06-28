@@ -23,6 +23,26 @@ export const networkCache: NetworkCache = {
 	relativeNetworkSnapshots: [],
 };
 
+export function resetNetworkCache() {
+	networkCache.networkStates = [];
+	networkCache.networkSnapshotFrame = null;
+	networkCache.networkSnaphot = null;
+	networkCache.relativeNetworkSnapshots = [];
+}
+
+export function pruneNetworkCacheBefore(cutoffFrame: number) {
+	for (const k in networkCache.networkStates) {
+		if (Number(k) < cutoffFrame) delete networkCache.networkStates[k];
+	}
+	for (const k in networkCache.relativeNetworkSnapshots) {
+		if (Number(k) < cutoffFrame) delete networkCache.relativeNetworkSnapshots[k];
+	}
+	if (networkCache.networkSnapshotFrame !== null && networkCache.networkSnapshotFrame < cutoffFrame) {
+		networkCache.networkSnapshotFrame = null;
+		networkCache.networkSnaphot = null;
+	}
+}
+
 // Worst case is ~14 bytes/object (large absolute position delta + full
 // orientation + index bits). 20 bytes/object + slack is comfortably safe and
 // scales with the configured body count instead of a fixed 16KB that overflowed
@@ -171,6 +191,11 @@ export function collectRelativeSnapshot(frame: number, baseFrame: number): Array
 // makes a 4096-body scene collapse to a few bytes once it settles.
 const _cmpA = new CompressedQuaternion(settings.orientationBits);
 const _cmpB = new CompressedQuaternion(settings.orientationBits);
+const _writeStateOrientation = new CompressedQuaternion(settings.orientationBits);
+const _writeBaseOrientation = new CompressedQuaternion(settings.orientationBits);
+const _positionChangedScratch = new Uint8Array(settings.maxPhysicsObjects);
+const _rotationChangedScratch = new Uint8Array(settings.maxPhysicsObjects);
+const _changedScratch = new Uint8Array(settings.maxPhysicsObjects);
 
 function quantizePos(n: number): number {
 	return Math.round(n * settings.unitsPerMeter);
@@ -195,31 +220,33 @@ function isNetworkStateEqual(state: NetworkBodyState, baseState: NetworkBodyStat
 	return isNetworkStatePositionEqual(state, baseState) && isNetworkStateRotationEqual(state, baseState);
 }
 
-function writeRelativeState(stream: RWBitStream, state: NetworkBodyState, baseState: NetworkBodyState) {
-	let positionChanged = !isNetworkStatePositionEqual(state, baseState);
+function writeRelativeState(stream: RWBitStream, state: NetworkBodyState, baseState: NetworkBodyState, positionDidChange?: boolean, rotationDidChange?: boolean) {
+	let positionChanged = positionDidChange ?? !isNetworkStatePositionEqual(state, baseState);
 	// write position changed
 	positionChanged = serializeBool(stream, positionChanged);
 
 	if (positionChanged) {
-		const { x, y, z } = worldPositionToNetworkPosition(state.position);
-		const { x: bx, y: by, z: bz } = worldPositionToNetworkPosition(baseState.position);
+		const x = quantizePos(state.position.x);
+		const y = quantizePos(state.position.y);
+		const z = quantizePos(state.position.z);
+		const bx = quantizePos(baseState.position.x);
+		const by = quantizePos(baseState.position.y);
+		const bz = quantizePos(baseState.position.z);
 		// write relative position
 		serializeRelativePosition(stream, x, y, z, bx, by, bz);
 	}
 
-	let rotationChanged = !isNetworkStateRotationEqual(state, baseState);
+	let rotationChanged = rotationDidChange ?? !isNetworkStateRotationEqual(state, baseState);
 	// write rotation changed
 	rotationChanged = serializeBool(stream, rotationChanged);
 
 	if (rotationChanged) {
 		const { x: qx, y: qy, z: qz, w: qw } = state.rotation;
 		const { x: bx, y: by, z: bz, w: bw } = baseState.rotation;
-		const stateOrientation = new CompressedQuaternion(settings.orientationBits);
-		const originOrientation = new CompressedQuaternion(settings.orientationBits);
-		stateOrientation.load(qx, qy, qz, qw);
-		originOrientation.load(bx, by, bz, bw);
+		_writeStateOrientation.load(qx, qy, qz, qw);
+		_writeBaseOrientation.load(bx, by, bz, bw);
 		// write relative rotation
-		serializeRelativeOrientation(stream, stateOrientation, originOrientation);
+		serializeRelativeOrientation(stream, _writeStateOrientation, _writeBaseOrientation);
 	}
 }
 
@@ -227,18 +254,20 @@ function writeRelativeNetworkSnapshot(stream: RWBitStream, state: NetworkBodySta
 	let useIndices = false;
 	let numChanged: number | undefined = undefined;
 
-	const changedArray: boolean[] = [];
-
 	numChanged = 0;
 	for (let i = 0; i < state.length; i++) {
-		const changed = !isNetworkStateEqual(state[i], baseState[i]);
-		changedArray.push(changed);
+		const positionChanged = !isNetworkStatePositionEqual(state[i], baseState[i]);
+		const rotationChanged = !isNetworkStateRotationEqual(state[i], baseState[i]);
+		const changed = positionChanged || rotationChanged;
+		_positionChangedScratch[i] = positionChanged ? 1 : 0;
+		_rotationChangedScratch[i] = rotationChanged ? 1 : 0;
+		_changedScratch[i] = changed ? 1 : 0;
 		if (changed) {
 			numChanged++;
 		}
 	}
 
-	const relativeBitSize = countRelativeIdBits(changedArray);
+	const relativeBitSize = countRelativeIdBits(_changedScratch.subarray(0, state.length));
 
 	useIndices = relativeBitSize < settings.maxPhysicsObjects;
 	// write use indices
@@ -252,7 +281,7 @@ function writeRelativeNetworkSnapshot(stream: RWBitStream, state: NetworkBodySta
 		let first = true;
 		let previousIndex = 0;
 		for (let i = 0; i < state.length; i++) {
-			const changed = !isNetworkStateEqual(state[i], baseState[i]);
+			const changed = _changedScratch[i] !== 0;
 
 			if (changed) {
 				if (first) {
@@ -265,20 +294,32 @@ function writeRelativeNetworkSnapshot(stream: RWBitStream, state: NetworkBodySta
 				}
 
 				// write relative state
-				writeRelativeState(stream, state[i], baseState[i]);
+				writeRelativeState(
+					stream,
+					state[i],
+					baseState[i],
+					_positionChangedScratch[i] !== 0,
+					_rotationChangedScratch[i] !== 0
+				);
 
 				previousIndex = i;
 			}
 		}
 	} else {
 		for (let i = 0; i < settings.maxPhysicsObjects; i++) {
-			let changed = !isNetworkStateEqual(state[i], baseState[i]);
+			let changed = _changedScratch[i] !== 0;
 			// write changed
 			changed = serializeBool(stream, changed);
 
 			if (changed) {
 				// write relative state
-				writeRelativeState(stream, state[i], baseState[i]);
+				writeRelativeState(
+					stream,
+					state[i],
+					baseState[i],
+					_positionChangedScratch[i] !== 0,
+					_rotationChangedScratch[i] !== 0
+				);
 			}
 		}
 	}
@@ -384,4 +425,3 @@ function readRelativeNetworkSnapshot(stream: RWBitStream, readState: NetworkBody
 
 	return readState;
 }
-

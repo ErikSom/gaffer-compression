@@ -5,7 +5,7 @@ import { RWBitStream } from "./networkInterfaces";
 
 const maxPositionInUnits = settings.positionBoundsInMeters * settings.unitsPerMeter;
 
-export function countRelativeIdBits(changed: boolean[]): number {
+export function countRelativeIdBits(changed: ArrayLike<boolean | number>): number {
 	// Derived from the configured body count so the encode-mode estimate stays
 	// accurate past 1024 objects (the old hardcoded 10-bit width under-counted).
 	const absoluteIndexBits = bitsRequired(0, settings.maxPhysicsObjects - 1);

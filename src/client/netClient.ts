@@ -11,15 +11,22 @@ import {
 	peekType,
 } from "../shared/protocol.js";
 import { DirectionalNetSim } from "./netSimulator.js";
-import { networkCache } from "../network/networkState.js";
+import { pruneNetworkCacheBefore, resetNetworkCache } from "../network/networkState.js";
 import type { NetworkBodyState } from "../network/networkInterfaces.js";
-import { TOTAL_OBJECTS } from "../shared/sceneConfig.js";
+import { MAX_PLAYERS, PLAYER_BASE_INDEX, TOTAL_OBJECTS } from "../shared/sceneConfig.js";
 import settings from "../settings.js";
 
 interface BufferedSnapshot {
 	frame: number;
 	state: NetworkBodyState[];
 }
+
+const MAX_BUFFERED_SNAPSHOTS = 24;
+const MAX_ADAPTIVE_EXTRA_DELAY_MS = 180;
+const DELAY_RISE_ALPHA = 0.35;
+const DELAY_FALL_ALPHA = 0.02;
+const MAX_EXTRAPOLATE_MS = 100;
+const MAX_EXTRAPOLATE_RATIO = 1.5;
 
 export interface NetStats {
 	bytesPerSecDown: number;
@@ -29,6 +36,7 @@ export interface NetStats {
 	lastPacketBytes: number;
 	serverFrame: number;
 	renderFrame: number;
+	lastProcessedInputSeq: number;
 }
 
 export class NetClient {
@@ -47,7 +55,9 @@ export class NetClient {
 
 	private snapshotBuffer: BufferedSnapshot[] = [];
 	private lastSnapshotFrame = -1;
+	private highestDecodedFrame = -1;
 	private inputSeq = 0;
+	private lastProcessedInputSeq = 0;
 
 	// Frame-number render clock: advances at real time in server-frame units and
 	// snaps back if it drifts (stall, big jitter, or a server restart). Playback
@@ -58,7 +68,11 @@ export class NetClient {
 	// server's actual physics-frame units, which change live when the rate does.
 	private physicsHz = settings.physicsHz;
 	private physicsDt = 1000 / settings.physicsHz;
-	private delayFrames = settings.renderDelayMs / (1000 / settings.physicsHz);
+	private snapshotHz = settings.snapshotHz;
+	private baseDelayFrames = settings.renderDelayMs / (1000 / settings.physicsHz);
+	private delayFrames = this.baseDelayFrames;
+	private lastSnapshotArrivalAt = 0;
+	private jitterEmaMs = 0;
 	public onConfig: ((physicsHz: number) => void) | null = null;
 
 	// stats
@@ -125,12 +139,15 @@ export class NetClient {
 	private resetSyncState() {
 		this.snapshotBuffer = [];
 		this.lastSnapshotFrame = -1;
+		this.highestDecodedFrame = -1;
+		this.lastProcessedInputSeq = 0;
 		this.renderFrame = -1;
 		this.lastClockAt = 0;
-		networkCache.networkStates = [];
-		networkCache.relativeNetworkSnapshots = [];
-		networkCache.networkSnapshotFrame = null;
-		networkCache.networkSnaphot = null;
+		this.lastSnapshotArrivalAt = 0;
+		this.jitterEmaMs = 0;
+		this.baseDelayFrames = settings.renderDelayMs / this.physicsDt;
+		this.delayFrames = this.baseDelayFrames;
+		resetNetworkCache();
 	}
 
 	setUpSimParams(p: Parameters<DirectionalNetSim["setParams"]>[0]) { this.upSim.setParams(p); }
@@ -164,9 +181,7 @@ export class NetClient {
 		if (type === MsgType.Config) {
 			const cfg = decodeConfig(buffer);
 			if (cfg) {
-				this.physicsHz = cfg.physicsHz;
-				this.physicsDt = 1000 / cfg.physicsHz;
-				this.delayFrames = settings.renderDelayMs / this.physicsDt;
+				this.setServerTiming(cfg.physicsHz, cfg.snapshotHz);
 				this.onConfig?.(cfg.physicsHz);
 			}
 			return;
@@ -176,12 +191,60 @@ export class NetClient {
 		if (!msg) return;
 
 		if (msg.type === MsgType.FullSnapshot || msg.type === MsgType.DeltaSnapshot) {
-			this.snapshotBuffer.push({ frame: msg.frame, state: cloneState(msg.state) });
-			this.snapshotBuffer.sort((a, b) => a.frame - b.frame);
-			while (this.snapshotBuffer.length > 12) this.snapshotBuffer.shift();
-			this.lastSnapshotFrame = msg.frame;
-			this.send(encodeAck(msg.frame));
+			this.recordSnapshotArrival(msg.frame);
+			this.lastProcessedInputSeq = msg.lastProcessedInputSeq;
+			this.insertSnapshot(msg.frame, msg.state);
+			if (msg.frame > this.highestDecodedFrame) {
+				this.highestDecodedFrame = msg.frame;
+				this.lastSnapshotFrame = msg.frame;
+			}
+			this.pruneClientCache();
+			this.send(encodeAck(this.highestDecodedFrame));
 		}
+	}
+
+	private setServerTiming(physicsHz: number, snapshotHz: number) {
+		this.physicsHz = physicsHz;
+		this.physicsDt = 1000 / physicsHz;
+		this.snapshotHz = snapshotHz;
+		this.baseDelayFrames = settings.renderDelayMs / this.physicsDt;
+		this.delayFrames = Math.max(this.delayFrames, this.baseDelayFrames);
+	}
+
+	private recordSnapshotArrival(frame: number) {
+		if (frame <= this.highestDecodedFrame) return;
+		const now = performance.now();
+		if (this.highestDecodedFrame >= 0 && this.lastSnapshotArrivalAt > 0) {
+			const expectedMs = (frame - this.highestDecodedFrame) * this.physicsDt;
+			const actualMs = now - this.lastSnapshotArrivalAt;
+			const jitterSample = Math.abs(actualMs - expectedMs);
+			this.jitterEmaMs = this.jitterEmaMs === 0 ? jitterSample : this.jitterEmaMs * 0.85 + jitterSample * 0.15;
+		}
+		this.lastSnapshotArrivalAt = now;
+	}
+
+	private insertSnapshot(frame: number, state: NetworkBodyState[]) {
+		for (const s of this.snapshotBuffer) {
+			if (s.frame === frame) return;
+		}
+		this.snapshotBuffer.push({ frame, state });
+		this.snapshotBuffer.sort((a, b) => a.frame - b.frame);
+		while (this.snapshotBuffer.length > MAX_BUFFERED_SNAPSHOTS) this.snapshotBuffer.shift();
+	}
+
+	private pruneClientCache() {
+		if (this.highestDecodedFrame < 0) return;
+		const cutoff = this.highestDecodedFrame - settings.snapshotHistory;
+		pruneNetworkCacheBefore(cutoff);
+	}
+
+	private updateAdaptiveDelay() {
+		const maxExtraFrames = MAX_ADAPTIVE_EXTRA_DELAY_MS / this.physicsDt;
+		const jitterFrames = this.physicsDt > 0 ? this.jitterEmaMs / this.physicsDt : 0;
+		const targetDelayFrames = this.baseDelayFrames + clamp(jitterFrames * 2, 0, maxExtraFrames);
+		const alpha = targetDelayFrames > this.delayFrames ? DELAY_RISE_ALPHA : DELAY_FALL_ALPHA;
+		this.delayFrames += (targetDelayFrames - this.delayFrames) * alpha;
+		if (this.delayFrames < this.baseDelayFrames) this.delayFrames = this.baseDelayFrames;
 	}
 
 	sendInput(move: { x: number; y: number; z: number }) {
@@ -204,6 +267,7 @@ export class NetClient {
 		if (buf.length === 0) return this.interpOut;
 
 		const now = performance.now();
+		this.updateAdaptiveDelay();
 		const newest = buf[buf.length - 1].frame;
 		const oldest = buf[0].frame;
 		const target = newest - this.delayFrames;
@@ -220,7 +284,7 @@ export class NetClient {
 			// Easing tracks a slow server smoothly and never moves the clock
 			// backward; only a large discontinuity (server restart) hard-resyncs.
 			const drift = target - this.renderFrame;
-			if (Math.abs(drift) > this.delayFrames * 4) {
+			if (Math.abs(drift) > Math.max(this.delayFrames * 4, 4)) {
 				this.renderFrame = target;
 			} else {
 				this.renderFrame += drift * 0.05;
@@ -228,8 +292,22 @@ export class NetClient {
 		}
 		this.lastClockAt = now;
 
-		// Sampling clamp only — if starved we hold at the newest snapshot (a brief
-		// pause), never rewind.
+		if (this.renderFrame > newest && buf.length >= 2) {
+			const newer = buf[buf.length - 1];
+			const older = buf[buf.length - 2];
+			const span = newer.frame - older.frame;
+			if (span > 0) {
+				const maxExtraFrames = MAX_EXTRAPOLATE_MS / this.physicsDt;
+				const extraFrames = Math.min(this.renderFrame - newest, maxExtraFrames);
+				if (extraFrames > 0) {
+					extrapolatePlayersInto(older.state, newer.state, span, extraFrames, this.interpOut);
+					return this.interpOut;
+				}
+			}
+		}
+
+		// Sampling clamp after the short extrapolation budget is gone — if starved
+		// for longer we hold at the newest snapshot, never rewind.
 		const rf = this.renderFrame < oldest ? oldest : this.renderFrame > newest ? newest : this.renderFrame;
 
 		if (buf.length === 1 || rf >= newest) {
@@ -277,16 +355,9 @@ export class NetClient {
 			lastPacketBytes: this.lastPacketBytes,
 			serverFrame: this.lastSnapshotFrame,
 			renderFrame: this.renderFrame >= 0 ? Math.round(this.renderFrame) : 0,
+			lastProcessedInputSeq: this.lastProcessedInputSeq,
 		};
 	}
-}
-
-function cloneState(s: NetworkBodyState[]): NetworkBodyState[] {
-	const out = new Array(s.length);
-	for (let i = 0; i < s.length; i++) {
-		out[i] = { position: s[i].position.clone(), rotation: s[i].rotation.clone() };
-	}
-	return out;
 }
 
 function copyStateInto(src: NetworkBodyState[], dst: NetworkBodyState[]) {
@@ -305,4 +376,27 @@ function lerpStatesInto(a: NetworkBodyState[], b: NetworkBodyState[], t: number,
 	}
 }
 
+function extrapolatePlayersInto(a: NetworkBodyState[], b: NetworkBodyState[], spanFrames: number, extraFrames: number, dst: NetworkBodyState[]) {
+	// Start from the newest authoritative snapshot. Collision-heavy boxes stay
+	// clamped there; only player bodies get a short visual extrapolation.
+	copyStateInto(b, dst);
+	const t = Math.min(extraFrames / spanFrames, MAX_EXTRAPOLATE_RATIO);
+	for (let i = 0; i < MAX_PLAYERS; i++) {
+		const index = PLAYER_BASE_INDEX + i;
+		if (index >= a.length || index >= b.length || index >= dst.length) break;
+		const older = a[index];
+		const newer = b[index];
+		if (newer.position.y <= -500) continue;
+		const ap = older.position;
+		const bp = newer.position;
+		dst[index].position.set(
+			bp.x + (bp.x - ap.x) * t,
+			bp.y + (bp.y - ap.y) * t,
+			bp.z + (bp.z - ap.z) * t
+		);
+		dst[index].rotation.copy(older.rotation).slerp(newer.rotation, 1 + t);
+	}
+}
+
 function clamp01(x: number): number { return x < 0 ? 0 : x > 1 ? 1 : x; }
+function clamp(x: number, lo: number, hi: number): number { return x < lo ? lo : x > hi ? hi : x; }
