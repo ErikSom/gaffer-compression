@@ -6,6 +6,11 @@ import { RWBitStream } from "./networkInterfaces";
 const maxPositionInUnits = settings.positionBoundsInMeters * settings.unitsPerMeter;
 
 export function countRelativeIdBits(changed: boolean[]): number {
+	// Derived from the configured body count so the encode-mode estimate stays
+	// accurate past 1024 objects (the old hardcoded 10-bit width under-counted).
+	const absoluteIndexBits = bitsRequired(0, settings.maxPhysicsObjects - 1);
+	const largeDifferenceBits = bitsRequired(127, settings.maxPhysicsObjects - 1);
+
 	let bits = 0;
 	let first = true;
 	let previousIndex = 0;
@@ -16,7 +21,7 @@ export function countRelativeIdBits(changed: boolean[]): number {
 			continue;
 
 		if (first) {
-			bits += 10;
+			bits += absoluteIndexBits;
 			first = false;
 			previousIndex = i;
 		}
@@ -42,7 +47,7 @@ export function countRelativeIdBits(changed: boolean[]): number {
 				bits += 1 + 1 + 1 + 1 + 1 + 1 + 6;
 			}
 			else {
-				bits += 1 + 1 + 1 + 1 + 1 + 1 + 1 + 10;
+				bits += 1 + 1 + 1 + 1 + 1 + 1 + 1 + largeDifferenceBits;
 			}
 
 			previousIndex = i;

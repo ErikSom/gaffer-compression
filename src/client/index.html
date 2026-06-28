@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+	<title>Gaffer Compression — massive physics</title>
+	<style>
+		html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0a0a0f; color: #e8e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; touch-action: none; overscroll-behavior: none; -webkit-user-select: none; user-select: none; }
+		#joystick-base { position: fixed; width: 110px; height: 110px; margin-left: -55px; margin-top: -55px; border-radius: 50%; background: rgba(255,255,255,.06); border: 2px solid rgba(255,255,255,.22); pointer-events: none; display: none; z-index: 20; }
+		#joystick-base.active { display: block; }
+		#joystick-knob { position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; border-radius: 50%; background: rgba(255,255,255,.42); box-shadow: 0 0 12px rgba(255,255,255,.3); transform: translate(-50%, -50%); }
+		#hud { position: fixed; top: 8px; left: 8px; padding: 8px 10px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.08); border-radius: 6px; font-size: 12px; line-height: 1.5; pointer-events: none; white-space: pre; }
+		#hint { position: fixed; bottom: 8px; left: 8px; opacity: .55; font-size: 11px; }
+		#debug { position: fixed; top: 8px; right: 8px; width: 300px; padding: 10px 12px; background: rgba(0,0,0,.75); border: 1px solid rgba(255,255,255,.15); border-radius: 6px; font-size: 12px; display: none; }
+		#debug.visible { display: block; }
+		#debug h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; opacity: .7; }
+		#debug .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+		#debug .row label { flex: 0 0 90px; font-size: 11px; opacity: .8; }
+		#debug .row input[type=range] { flex: 1; }
+		#debug .row .val { flex: 0 0 56px; text-align: right; font-variant-numeric: tabular-nums; }
+		#debug .preset { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+		#debug .preset button { flex: 1; padding: 4px 6px; font-size: 11px; background: #222; border: 1px solid #333; color: #ddd; border-radius: 3px; cursor: pointer; font-family: inherit; }
+		#debug .preset button:hover { background: #2d2d3a; }
+		#debug .preset button.active { background: #3a5a8a; border-color: #5a7aaa; }
+		#reset-boxes { width: 100%; margin-top: 12px; padding: 7px; font-size: 12px; background: #2a3550; border: 1px solid #3d4d72; color: #dde6ff; border-radius: 4px; cursor: pointer; font-family: inherit; }
+		#reset-boxes:hover { background: #34416a; }
+		#reset-boxes:active { background: #3a5a8a; }
+		#debug .stats { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.1); font-size: 11px; line-height: 1.6; }
+		canvas { display: block; }
+	</style>
+</head>
+<body>
+	<div id="hud">connecting...</div>
+	<div id="hint">Arrow keys or touch-drag to drive · C to toggle camera · F1 for network sim</div>
+	<div id="debug">
+		<h3>Network Simulator</h3>
+		<div class="preset">
+			<button data-preset="lan">LAN</button>
+			<button data-preset="broadband">Broadband</button>
+			<button data-preset="3g">3G</button>
+			<button data-preset="sat">Satellite</button>
+			<button data-preset="cursed">Cursed</button>
+		</div>
+		<div class="row"><label>Latency</label><input id="s-lat" type="range" min="0" max="500" step="5"><span class="val" id="v-lat"></span></div>
+		<div class="row"><label>Jitter</label><input id="s-jit" type="range" min="0" max="200" step="5"><span class="val" id="v-jit"></span></div>
+		<div class="row"><label>Loss</label><input id="s-loss" type="range" min="0" max="30" step="1"><span class="val" id="v-loss"></span></div>
+		<div class="row"><label>Bandwidth</label><input id="s-bw" type="range" min="0" max="20" step="1"><span class="val" id="v-bw"></span></div>
+		<h3 style="margin-top:12px">Physics Rate</h3>
+		<div class="preset" id="hz-buttons">
+			<button data-hz="30">30Hz</button>
+			<button data-hz="40">40Hz</button>
+			<button data-hz="50">50Hz</button>
+			<button data-hz="60">60Hz</button>
+		</div>
+		<button id="reset-boxes">↺ Reset boxes</button>
+		<div class="stats" id="netstats"></div>
+	</div>
+	<script type="module" src="./main.ts"></script>
+</body>
+</html>

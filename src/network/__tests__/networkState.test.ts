@@ -29,6 +29,12 @@ function randomQuaternion() {
 	);
 }
 
+// Smallest angle between two orientations, in degrees.
+function quatAngleDeg(a: Quaternion, b: Quaternion): number {
+	const dot = Math.min(1, Math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w));
+	return (2 * Math.acos(dot) * 180) / Math.PI;
+}
+
 function randomWorldPosition() {
 	const { positionBoundsInMeters } = settings;
 
@@ -89,42 +95,27 @@ function cloneState(baseState) {
 	return state;
 }
 
-function offsetState(state, indexesToOffset, maxOffsetDelta) {
+// Offset each selected object by an amount guaranteed to exceed the wire
+// quantization resolution (1cm position, ~0.3deg orientation at 9 bits), so the
+// change detector reliably flags it. Sub-resolution offsets are intentionally
+// free now, so the test must perturb above the threshold to exercise the codec.
+function offsetState(state, indexesToOffset, maxPosOffset) {
+	const sign = () => (Math.random() < 0.5 ? -1 : 1);
+	const axisMag = () => 0.03 + Math.random() * Math.max(0, maxPosOffset - 0.03);
+
 	indexesToOffset.forEach(index => {
+		const obj = state[index];
 
-		let posChanged = false;
+		// position: >= 3cm on every axis (well above the 1cm resolution)
+		obj.position.x += sign() * axisMag();
+		obj.position.y += sign() * axisMag();
+		obj.position.z += sign() * axisMag();
 
-		// randomly offset position
-		if (Math.random() > 0.5) {
-			const cached = state[index];
-			const position = cached.position;
-			position.x += maxOffsetDelta * 2 * Math.random() - maxOffsetDelta;
-			position.y += maxOffsetDelta * 2 * Math.random() - maxOffsetDelta;
-			position.z += maxOffsetDelta * 2 * Math.random() - maxOffsetDelta;
-			posChanged = true;
-		}
-
-		// randomly offset rotation, or always offset if position was not changed
-		if (!posChanged || Math.random() > 0.5) {
-			// offset rotation with maxOffsetDelta degrees
-			const cached = state[index];
-			const rotation = cached.rotation;
-
-			// Generate a random rotation axis
-			let axis = randomUnitVector();
-
-			// Create a small rotation angle within maxOffsetDelta range
-			let smallAngle = (Math.random() * 2 - 1) * maxOffsetDelta * Math.PI / 180; // Convert to radians
-			let smallRotation = new Quaternion(
-				axis.x * Math.sin(smallAngle / 2),
-				axis.y * Math.sin(smallAngle / 2),
-				axis.z * Math.sin(smallAngle / 2),
-				Math.cos(smallAngle / 2)
-			);
-
-			// Apply the small rotation to the current rotation
-			rotation.multiply(smallRotation);
-		}
+		// rotation: a clean 1.5deg..4deg twist, above the ~0.3deg resolution
+		const axis = randomUnitVector();
+		const angle = (1.5 + Math.random() * 2.5) * Math.PI / 180;
+		const s = Math.sin(angle / 2);
+		obj.rotation.multiply(new Quaternion(axis.x * s, axis.y * s, axis.z * s, Math.cos(angle / 2)));
 	});
 }
 
@@ -152,31 +143,43 @@ test('test relative networkstate snapshot serialisation with relative indexing',
 
 	const networkState = getNetworkStateFromRelativeSnapshot(snapshot, 0);
 
-	const baseCached = networkCache.networkStates[0];
-
 	for (let i = 0; i < indexesToOffset.length; i++) {
 		const index = indexesToOffset[i];
-		const cached = networkState[index];
-		const baseCachedObject = baseCached[index];
+		const decoded = networkState[index];
+		const sent = state[index];
+		const base = baseState[index];
 
-		// expect that either position or rotation is different
-		const positionChanged = !cached.position.equals(baseCachedObject.position);
-		const rotationChanged = !cached.rotation.equals(baseCachedObject.rotation);
-		expect(positionChanged || rotationChanged).toBeTruthy();
+		// the offset (supra-resolution) must register as changed from the baseline
+		const changed = !decoded.position.equals(base.position) || !decoded.rotation.equals(base.rotation);
+		expect(changed).toBeTruthy();
 
-		const maxAllowedComponentDifference = 1 / settings.unitsPerMeter + maxOffsetDelta;
-
-		expect(Math.abs(cached.position.x - baseCachedObject.position.x)).toBeLessThanOrEqual(maxAllowedComponentDifference);
-		expect(Math.abs(cached.position.y - baseCachedObject.position.y)).toBeLessThanOrEqual(maxAllowedComponentDifference);
-		expect(Math.abs(cached.position.z - baseCachedObject.position.z)).toBeLessThanOrEqual(maxAllowedComponentDifference);
-
-		const maxAllowedRotationDifference = 1 / settings.unitsPerMeter;
-
-		expect(Math.abs(cached.rotation.x) - Math.abs(baseCachedObject.rotation.x)).toBeLessThan(maxAllowedRotationDifference);
-		expect(Math.abs(cached.rotation.y) - Math.abs(baseCachedObject.rotation.y)).toBeLessThan(maxAllowedRotationDifference);
-		expect(Math.abs(cached.rotation.z) - Math.abs(baseCachedObject.rotation.z)).toBeLessThan(maxAllowedRotationDifference);
-		expect(Math.abs(cached.rotation.w) - Math.abs(baseCachedObject.rotation.w)).toBeLessThan(maxAllowedRotationDifference);
+		// ...and round-trip to within the wire quantization of what was sent
+		expect(Math.abs(decoded.position.x - sent.position.x)).toBeLessThanOrEqual(1 / settings.unitsPerMeter);
+		expect(Math.abs(decoded.position.y - sent.position.y)).toBeLessThanOrEqual(1 / settings.unitsPerMeter);
+		expect(Math.abs(decoded.position.z - sent.position.z)).toBeLessThanOrEqual(1 / settings.unitsPerMeter);
+		expect(quatAngleDeg(decoded.rotation, sent.rotation)).toBeLessThan(1.0);
 	}
+});
+
+test('a fully settled scene (nothing changed) costs almost nothing', () => {
+	// The headline property: thousands of sleeping bodies whose quantized pose is
+	// unchanged collapse to a handful of bytes — just frame id + "0 changed".
+	const baseState = generateFakeFullNetworkState();
+	const state = cloneState(baseState); // identical: every body asleep
+
+	networkCache.networkStates = [baseState, state];
+	networkCache.relativeNetworkSnapshots = [];
+
+	const snapshot = collectRelativeSnapshot(1, 0);
+	console.log(`Settled delta for ${settings.maxPhysicsObjects} bodies:`, snapshot.byteLength, "bytes");
+
+	// 4 bytes frame + a couple header bits, rounded up to whole bytes.
+	expect(snapshot.byteLength).toBeLessThanOrEqual(8);
+
+	// And it still round-trips to the (unchanged) base state.
+	const decoded = getNetworkStateFromRelativeSnapshot(snapshot, 0);
+	expect(decoded.length).toBe(baseState.length);
+	expect(decoded[0].position.equals(baseState[0].position)).toBeTruthy();
 });
 
 test('test relative networkstate snapshot serialisation with absolute indexing', () => {
@@ -209,28 +212,20 @@ test('test relative networkstate snapshot serialisation with absolute indexing',
 
 	const networkState = getNetworkStateFromRelativeSnapshot(snapshot, 0);
 
-	const baseCached = networkCache.networkStates[0];
-
 	for (let i = 0; i < indexesToOffset.length; i++) {
 		const index = indexesToOffset[i];
-		const cached = networkState[index];
-		const baseCachedObject = baseCached[index];
+		const decoded = networkState[index];
+		const sent = state[index];
+		const base = baseState[index];
 
-		// expect that either position or rotation is different
-		const positionChanged = !cached.position.equals(baseCachedObject.position);
-		const rotationChanged = !cached.rotation.equals(baseCachedObject.rotation);
-		expect(positionChanged || rotationChanged).toBeTruthy();
+		// the offset (supra-resolution) must register as changed from the baseline
+		const changed = !decoded.position.equals(base.position) || !decoded.rotation.equals(base.rotation);
+		expect(changed).toBeTruthy();
 
-		const maxAllowedComponentDifference = 1 / settings.unitsPerMeter + maxOffsetDelta;
-
-		expect(Math.abs(cached.position.x - baseCachedObject.position.x)).toBeLessThanOrEqual(maxAllowedComponentDifference);
-		expect(Math.abs(cached.position.y - baseCachedObject.position.y)).toBeLessThanOrEqual(maxAllowedComponentDifference);
-		expect(Math.abs(cached.position.z - baseCachedObject.position.z)).toBeLessThanOrEqual(maxAllowedComponentDifference);
-
-		const maxAllowedRotationDifference = 1 / settings.unitsPerMeter;
-		expect(Math.abs(cached.rotation.x) - Math.abs(baseCachedObject.rotation.x)).toBeLessThan(maxAllowedRotationDifference);
-		expect(Math.abs(cached.rotation.y) - Math.abs(baseCachedObject.rotation.y)).toBeLessThan(maxAllowedRotationDifference);
-		expect(Math.abs(cached.rotation.z) - Math.abs(baseCachedObject.rotation.z)).toBeLessThan(maxAllowedRotationDifference);
-		expect(Math.abs(cached.rotation.w) - Math.abs(baseCachedObject.rotation.w)).toBeLessThan(maxAllowedRotationDifference);
+		// ...and round-trip to within the wire quantization of what was sent
+		expect(Math.abs(decoded.position.x - sent.position.x)).toBeLessThanOrEqual(1 / settings.unitsPerMeter);
+		expect(Math.abs(decoded.position.y - sent.position.y)).toBeLessThanOrEqual(1 / settings.unitsPerMeter);
+		expect(Math.abs(decoded.position.z - sent.position.z)).toBeLessThanOrEqual(1 / settings.unitsPerMeter);
+		expect(quatAngleDeg(decoded.rotation, sent.rotation)).toBeLessThan(1.0);
 	}
 });

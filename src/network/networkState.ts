@@ -23,6 +23,19 @@ export const networkCache: NetworkCache = {
 	relativeNetworkSnapshots: [],
 };
 
+// Worst case is ~14 bytes/object (large absolute position delta + full
+// orientation + index bits). 20 bytes/object + slack is comfortably safe and
+// scales with the configured body count instead of a fixed 16KB that overflowed
+// past ~1500 objects.
+const SNAPSHOT_BUFFER_BYTES = settings.maxPhysicsObjects * 20 + 2048;
+
+// Single reusable serialization buffer for the write path (server only). Each
+// snapshot writes into it then slices out just the bytes it used, so we churn
+// only the final right-sized packet instead of a fresh 84KB ArrayBuffer every
+// 20Hz tick. Write calls are synchronous and sequential, so one scratch is safe.
+const scratchBuffer = new ArrayBuffer(SNAPSHOT_BUFFER_BYTES);
+const scratchView = new BitView(scratchBuffer);
+
 function worldPositionToNetworkPosition(position: Vector3) {
 	const networkX = Math.round(position.x * settings.unitsPerMeter);
 	const networkY = Math.round(position.y * settings.unitsPerMeter);
@@ -41,22 +54,23 @@ function networkPositionToWorldPosition(position: Vector3) {
 
 export function collectFullSnapshot(frame: number): ArrayBuffer {
 
-	if (networkCache.networkSnapshotFrame === frame) {
-		return networkCache.networkSnaphot!;
+	if (networkCache.networkSnapshotFrame === frame && networkCache.networkSnaphot) {
+		return networkCache.networkSnaphot;
 	}
 
 	const state = networkCache.networkStates[frame];
 
-	const buffer = new ArrayBuffer(16 * 1024); // start with 16kb buffer 8 * 1024
-	const bitView = new BitView(buffer);
-	const rwBitStream = new BitStream(bitView) as RWBitStream;
+	const rwBitStream = new BitStream(scratchView) as RWBitStream;
 	rwBitStream.isWriting = true;
 
 	serializeInt(rwBitStream, frame, 0, settings.maxPackageId);
 
 	writeFullNetworkSnapshot(rwBitStream, state);
 
-	const trimmedBuffer = buffer.slice(0, Math.ceil(rwBitStream.index / 8));
+	const trimmedBuffer = scratchBuffer.slice(0, Math.ceil(rwBitStream.index / 8));
+
+	networkCache.networkSnapshotFrame = frame;
+	networkCache.networkSnaphot = trimmedBuffer;
 
 	return trimmedBuffer;
 }
@@ -133,16 +147,14 @@ export function collectRelativeSnapshot(frame: number, baseFrame: number): Array
 		throw new Error(`Base state for frame ${baseFrame} not found`);
 	}
 
-	const buffer = new ArrayBuffer(8192); // start with 8kb buffer 8 * 1024
-	const bitView = new BitView(buffer);
-	const rwBitStream = new BitStream(bitView) as RWBitStream;
+	const rwBitStream = new BitStream(scratchView) as RWBitStream;
 	rwBitStream.isWriting = true;
 
 	serializeInt(rwBitStream, frame, 0, settings.maxPackageId);
 
 	writeRelativeNetworkSnapshot(rwBitStream, state, baseState);
 
-	const trimmedBuffer = buffer.slice(0, Math.ceil(rwBitStream.index / 8));
+	const trimmedBuffer = scratchBuffer.slice(0, Math.ceil(rwBitStream.index / 8));
 
 	if (!networkCache.relativeNetworkSnapshots[frame]) {
 		networkCache.relativeNetworkSnapshots[frame] = [];
@@ -152,16 +164,35 @@ export function collectRelativeSnapshot(frame: number, baseFrame: number): Array
 	return trimmedBuffer;
 }
 
-function isNetworkStateEqual(state: NetworkBodyState, baseState: NetworkBodyState) {
-	return state.position.equals(baseState.position) && state.rotation.equals(baseState.rotation);
+// Change-detection compares the *quantized* values that actually go on the
+// wire (cm-resolution position, smallest-three orientation integers), not raw
+// floats. Two states that serialize identically are therefore "equal" and cost
+// nothing — resting bodies and sub-resolution jitter become free, which is what
+// makes a 4096-body scene collapse to a few bytes once it settles.
+const _cmpA = new CompressedQuaternion(settings.orientationBits);
+const _cmpB = new CompressedQuaternion(settings.orientationBits);
+
+function quantizePos(n: number): number {
+	return Math.round(n * settings.unitsPerMeter);
 }
 
 function isNetworkStatePositionEqual(state: NetworkBodyState, baseState: NetworkBodyState) {
-	return state.position.equals(baseState.position);
+	return quantizePos(state.position.x) === quantizePos(baseState.position.x)
+		&& quantizePos(state.position.y) === quantizePos(baseState.position.y)
+		&& quantizePos(state.position.z) === quantizePos(baseState.position.z);
 }
 
 function isNetworkStateRotationEqual(state: NetworkBodyState, baseState: NetworkBodyState) {
-	return state.rotation.equals(baseState.rotation);
+	_cmpA.load(state.rotation.x, state.rotation.y, state.rotation.z, state.rotation.w);
+	_cmpB.load(baseState.rotation.x, baseState.rotation.y, baseState.rotation.z, baseState.rotation.w);
+	return _cmpA.largest === _cmpB.largest
+		&& _cmpA.integerA === _cmpB.integerA
+		&& _cmpA.integerB === _cmpB.integerB
+		&& _cmpA.integerC === _cmpB.integerC;
+}
+
+function isNetworkStateEqual(state: NetworkBodyState, baseState: NetworkBodyState) {
+	return isNetworkStatePositionEqual(state, baseState) && isNetworkStateRotationEqual(state, baseState);
 }
 
 function writeRelativeState(stream: RWBitStream, state: NetworkBodyState, baseState: NetworkBodyState) {
