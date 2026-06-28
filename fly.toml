@@ -6,7 +6,7 @@
 # (`fly scale count 1`). Multiple machines would each run a separate, divergent
 # simulation and split players across them.
 
-app = "gaffer-compression-server" # must be globally unique — change if taken
+app = "gaffer-compression" # must be globally unique — change if taken
 primary_region = "fra"            # Frankfurt; pick the region nearest your players
 
 [build]
