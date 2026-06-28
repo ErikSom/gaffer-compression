@@ -1,0 +1,13 @@
+# Caddy automatically provisions and renews a Let's Encrypt TLS cert for
+# SITE_ADDRESS, terminates HTTPS/WSS, and reverse-proxies to the game server.
+# WebSocket upgrades are forwarded transparently — no extra config needed.
+#
+# Requires: SITE_ADDRESS resolves (DNS A record) to this host's public IP, and
+# ports 80 + 443 are open (used for the ACME challenge and live traffic).
+{
+	email {$ACME_EMAIL}
+}
+
+{$SITE_ADDRESS} {
+	reverse_proxy server:8787
+}

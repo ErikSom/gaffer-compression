@@ -24,19 +24,31 @@ The app splits into two independently-hosted pieces:
 
 - **Static client** (the Vite build) — host anywhere free, e.g. **Cloudflare Pages**.
 - **Game server** (authoritative WebSocket + physics loop) — a single always-on
-  stateful process; host on **Render** (free Web Service tier).
+  stateful process whose baseline cost is set by the box count (4096 bodies at
+  40 Hz), independent of player count.
 
-### Server → Render
+### Server → Oracle Cloud Free (recommended)
 
-A [`render.yaml`](render.yaml) Blueprint is included. Point Render at this repo and
-it builds the `gaffer-compression-server` Web Service automatically. The server
-binds to Render's `$PORT` and exposes a `/` health check. Note the public URL it
-gets (e.g. `https://gaffer-compression-server.onrender.com`).
+The server CPU cost is real and constant. A weak free instance (e.g. Render free's
+0.1 vCPU) can't step 4096 bodies at 40 Hz in real time, so the snapshot stream
+collapses and play stutters. **Oracle Cloud's Always Free ARM tier** gives a real,
+always-on VM that runs the full sim at $0.
 
-The free tier sleeps after ~15 min idle and cold-starts (~30–60s) on the next
-connection. The client covers this with a loading/"waking" overlay and warms the
-dyno with a fetch on load. Concurrent players are capped server-side by
-`MAX_PLAYERS` (currently 8).
+See **[deploy/oracle-cloud.md](deploy/oracle-cloud.md)** for the full walkthrough
+(VM, firewall, DNS, Docker Compose with Caddy for automatic HTTPS/WSS). The included
+[`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml), and
+[`Caddyfile`](Caddyfile) deploy the server + TLS in one `docker compose up`.
+
+Concurrent players are capped server-side by `MAX_PLAYERS` (currently 8).
+
+### Server → Render (free, but limited)
+
+A [`render.yaml`](render.yaml) Blueprint is also included. It's the simplest deploy
+(point Render at the repo and it builds the Web Service automatically, binding `$PORT`
+with a `/` health check), but the free tier's CPU is too weak for the full-scale
+sim — use it only with a much smaller `DYNAMIC_COUNT`, or on a paid plan. The free
+tier also sleeps after ~15 min idle and cold-starts (~30–60s); the client covers
+that with a loading/"waking" overlay and warms the dyno with a fetch on load.
 
 ### Client → Cloudflare Pages
 

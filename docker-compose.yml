@@ -1,0 +1,31 @@
+# Two services: the Node game server (internal only) and Caddy in front of it for
+# automatic HTTPS/WSS. Set SITE_ADDRESS and ACME_EMAIL in a .env file next to this
+# (see deploy/oracle-cloud.md), then: docker compose up -d --build
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    environment:
+      - PORT=8787
+    expose:
+      - "8787" # internal to the compose network; not published to the host
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80" # ACME HTTP challenge + redirect to HTTPS
+      - "443:443" # HTTPS / WSS
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS}
+      - ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # persists the TLS cert across restarts
+      - caddy_config:/config
+    depends_on:
+      - server
+
+volumes:
+  caddy_data:
+  caddy_config:
