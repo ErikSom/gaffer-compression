@@ -25,11 +25,23 @@
 		#reset-boxes { width: 100%; margin-top: 12px; padding: 7px; font-size: 12px; background: #2a3550; border: 1px solid #3d4d72; color: #dde6ff; border-radius: 4px; cursor: pointer; font-family: inherit; }
 		#reset-boxes:hover { background: #34416a; }
 		#reset-boxes:active { background: #3a5a8a; }
+		#ghost-toggle { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11px; opacity: .85; cursor: pointer; }
 		#debug .stats { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.1); font-size: 11px; line-height: 1.6; }
 		canvas { display: block; }
+		#loading { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: #0a0a0f; color: #e8e8f0; text-align: center; padding: 24px; transition: opacity .4s ease; }
+		#loading.hidden { opacity: 0; pointer-events: none; visibility: hidden; }
+		#loading .spinner { width: 38px; height: 38px; border-radius: 50%; border: 3px solid rgba(255,255,255,.15); border-top-color: rgba(255,255,255,.8); animation: spin .9s linear infinite; }
+		@keyframes spin { to { transform: rotate(360deg); } }
+		#loading-title { font-size: 15px; letter-spacing: .03em; }
+		#loading-sub { font-size: 12px; opacity: .6; max-width: 320px; line-height: 1.5; min-height: 1.5em; }
 	</style>
 </head>
 <body>
+	<div id="loading">
+		<div class="spinner"></div>
+		<div id="loading-title">Connecting…</div>
+		<div id="loading-sub"></div>
+	</div>
 	<div id="hud">connecting...</div>
 	<div id="hint">Arrow keys or touch-drag to drive · C to toggle camera · F1 for network sim</div>
 	<div id="debug">
@@ -53,6 +65,7 @@
 			<button data-hz="60">60Hz</button>
 		</div>
 		<button id="reset-boxes">↺ Reset boxes</button>
+		<label id="ghost-toggle"><input type="checkbox" id="show-ghost"> show server ghost</label>
 		<div class="stats" id="netstats"></div>
 	</div>
 	<script type="module" src="./main.ts"></script>

@@ -21,6 +21,10 @@ export const TOTAL_OBJECTS = DYNAMIC_COUNT + MAX_PLAYERS;
 export const WORLD_HALF = 35;
 export const FLOOR_Y = 0;
 
+// Shared so the client's local prediction integrates the same gravity the server
+// simulates.
+export const GRAVITY_Y = -19.62;
+
 export const BOX_SIZE = 0.6;
 
 // Several tall piles spread across the arena (PILE_GRID × PILE_GRID of them),

@@ -117,7 +117,9 @@ export function writeFullNetworkSnapshot(stream: RWBitStream, state: NetworkBody
 	});
 }
 
-export function getNetworkStateFromFullSnapshot(buffer: ArrayBuffer): NetworkBodyState[] {
+// `out`, when supplied, is written in place (no per-object allocation) — the
+// client passes a pooled state array so steady-state decoding never churns GC.
+export function getNetworkStateFromFullSnapshot(buffer: ArrayBuffer, out?: NetworkBodyState[]): NetworkBodyState[] {
 	const bitView = new BitView(buffer);
 	const rwBitStream = new BitStream(bitView) as RWBitStream;
 	rwBitStream.isWriting = false;
@@ -126,11 +128,11 @@ export function getNetworkStateFromFullSnapshot(buffer: ArrayBuffer): NetworkBod
 
 	serializeInt(rwBitStream, 0, 0, settings.maxPackageId);
 
-	return readFullNetworkSnapshot(rwBitStream);
+	return readFullNetworkSnapshot(rwBitStream, out);
 }
 
-function readFullNetworkSnapshot(stream: RWBitStream): NetworkBodyState[] {
-	const state = [] as NetworkBodyState[];
+function readFullNetworkSnapshot(stream: RWBitStream, out?: NetworkBodyState[]): NetworkBodyState[] {
+	const state = out ?? ([] as NetworkBodyState[]);
 
 	// Read the length of the state array first
 	const length = serializeInt(stream, 0, 0, settings.maxPhysicsObjects);
@@ -147,9 +149,13 @@ function readFullNetworkSnapshot(stream: RWBitStream): NetworkBodyState[] {
 
 		serializeRelativeOrientation(stream, stateOrientation, originOrientation);
 		const { x: qx, y: qy, z: qz, w: qw } = stateOrientation.save();
-		const rotation = new Quaternion(qx, qy, qz, qw);
 
-		state.push({ position, rotation });
+		if (out) {
+			out[i].position.copy(position);
+			out[i].rotation.set(qx, qy, qz, qw);
+		} else {
+			state.push({ position, rotation: new Quaternion(qx, qy, qz, qw) });
+		}
 	}
 
 	return state;
@@ -325,7 +331,7 @@ function writeRelativeNetworkSnapshot(stream: RWBitStream, state: NetworkBodySta
 	}
 }
 
-export function getNetworkStateFromRelativeSnapshot(buffer: ArrayBuffer, baseFrame: number): NetworkBodyState[] {
+export function getNetworkStateFromRelativeSnapshot(buffer: ArrayBuffer, baseFrame: number, out?: NetworkBodyState[]): NetworkBodyState[] {
 	const bitView = new BitView(buffer);
 	const rwBitStream = new BitStream(bitView) as RWBitStream;
 	rwBitStream.isWriting = false;
@@ -337,9 +343,19 @@ export function getNetworkStateFromRelativeSnapshot(buffer: ArrayBuffer, baseFra
 
 	const baseState = networkCache.networkStates[baseFrame];
 
-	const state = baseState.map(object => {
-		return { position: object.position.clone(), rotation: object.rotation.clone() };
-	})
+	let state: NetworkBodyState[];
+	if (out) {
+		// Reuse the pooled array: copy the baseline in place, then apply the delta.
+		for (let i = 0; i < baseState.length; i++) {
+			out[i].position.copy(baseState[i].position);
+			out[i].rotation.copy(baseState[i].rotation);
+		}
+		state = out;
+	} else {
+		state = baseState.map(object => {
+			return { position: object.position.clone(), rotation: object.rotation.clone() };
+		});
+	}
 
 	readRelativeNetworkSnapshot(rwBitStream, state, baseState);
 
@@ -358,7 +374,8 @@ function readRelativeState(stream: RWBitStream, state: NetworkBodyState, baseSta
 		const { x: bx, y: by, z: bz } = worldPositionToNetworkPosition(baseState.position);
 		// read relative position
 		const networkPosition = serializeRelativePosition(stream, 0, 0, 0, bx, by, bz);
-		state.position = networkPositionToWorldPosition(networkPosition);
+		// Mutate in place so a pooled `out` array keeps its Vector3 instances.
+		state.position.copy(networkPositionToWorldPosition(networkPosition));
 	}
 
 	let rotationChanged = false;

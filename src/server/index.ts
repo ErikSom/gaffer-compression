@@ -1,3 +1,4 @@
+import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import RAPIER from "@dimforge/rapier3d-compat";
 import { Quaternion, Vector3 } from "three";
@@ -14,6 +15,7 @@ import {
 import {
 	WORLD_HALF,
 	FLOOR_Y,
+	GRAVITY_Y,
 	DYNAMIC_COUNT,
 	SPAWN_LAYERS,
 	PILE_GRID,
@@ -34,7 +36,8 @@ import {
 import settings from "../settings.js";
 import { hasFreshInput, impulseScaleForHz, isNewerInputSeq, newestFrame } from "./simulationControls.js";
 
-const PORT = 8787;
+// Render (and most PaaS) inject the port to bind via $PORT; fall back to 8787 locally.
+const PORT = Number(process.env.PORT) || 8787;
 
 // Don't broadcast to a client whose socket is already this backed up — on a real
 // constrained downlink the send buffer grows under TCP backpressure, and piling
@@ -56,7 +59,7 @@ interface ClientRec {
 async function main() {
 	await RAPIER.init();
 
-	const world = new RAPIER.World({ x: 0, y: -19.62, z: 0 });
+	const world = new RAPIER.World({ x: 0, y: GRAVITY_Y, z: 0 });
 	world.timestep = 1 / settings.physicsHz;
 
 	// floor
@@ -360,8 +363,17 @@ async function main() {
 
 	startLoop();
 
-	const wss = new WebSocketServer({ port: PORT });
-	console.log(`server listening on ws://localhost:${PORT} — ${DYNAMIC_COUNT} boxes`);
+	// Plain HTTP server next to the WS server: gives the host a 200 health check and
+	// an endpoint the client can hit to wake a slept free-tier dyno (any inbound
+	// request triggers the wake; a fetch avoids the per-attempt WS console noise).
+	const httpServer = createServer((req, res) => {
+		res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" });
+		res.end("ok");
+	});
+	const wss = new WebSocketServer({ server: httpServer });
+	httpServer.listen(PORT, () => {
+		console.log(`server listening on :${PORT} — ${DYNAMIC_COUNT} boxes`);
+	});
 
 	wss.on("connection", (ws) => {
 		const slot = claimSlot();

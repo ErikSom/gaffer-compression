@@ -16,6 +16,7 @@ export class Renderer {
 	public boxes: THREE.InstancedMesh;
 	public playerMeshes: THREE.Mesh[] = [];
 	private ownRing!: THREE.Mesh;
+	private ghostMesh!: THREE.Mesh;
 	private tmpMat = new THREE.Matrix4();
 	private tmpPos = new THREE.Vector3();
 	private tmpQuat = new THREE.Quaternion();
@@ -122,11 +123,28 @@ export class Renderer {
 		this.ownRing.visible = false;
 		this.scene.add(this.ownRing);
 
+		// Transparent "server ghost" of the owned ball (debug overlay).
+		this.ghostMesh = new THREE.Mesh(
+			new THREE.SphereGeometry(PLAYER_RADIUS * 1.02, 20, 14),
+			new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false })
+		);
+		this.ghostMesh.visible = false;
+		this.ghostMesh.renderOrder = 2;
+		this.scene.add(this.ghostMesh);
+
 		window.addEventListener("resize", () => this.onResize());
 	}
 
 	setOwnedPlayerIndex(globalIndex: number) {
 		this.ownedIndex = globalIndex;
+	}
+
+	updateGhost(visible: boolean, position: THREE.Vector3, rotation: THREE.Quaternion) {
+		this.ghostMesh.visible = visible;
+		if (visible) {
+			this.ghostMesh.position.copy(position);
+			this.ghostMesh.quaternion.copy(rotation);
+		}
 	}
 
 	onResize() {
@@ -183,6 +201,8 @@ export class Renderer {
 
 	private camTargetPos = new THREE.Vector3();
 	private camTargetLook = new THREE.Vector3();
+	private camLookPos = new THREE.Vector3(0, 3, 0);
+	private camLookReady = false;
 	private orbitT = 0.5;
 	public mode: "chase" | "orbit" = "chase";
 
@@ -197,8 +217,13 @@ export class Renderer {
 			const p = state[this.ownedIndex].position;
 			this.camTargetPos.set(p.x, p.y + 12, p.z + 18);
 			this.camTargetLook.set(p.x, p.y, p.z - 10);
+			if (!this.camLookReady) {
+				this.camLookPos.copy(this.camTargetLook);
+				this.camLookReady = true;
+			}
 			this.camera.position.lerp(this.camTargetPos, 0.12);
-			this.camera.lookAt(this.camTargetLook);
+			this.camLookPos.lerp(this.camTargetLook, 0.18);
+			this.camera.lookAt(this.camLookPos);
 			return;
 		}
 
@@ -207,8 +232,14 @@ export class Renderer {
 		const camX = Math.cos(this.orbitT) * r;
 		const camZ = Math.sin(this.orbitT) * r;
 		this.camTargetPos.set(camX, 22, camZ);
+		this.camTargetLook.set(0, 3, 0);
+		if (!this.camLookReady) {
+			this.camLookPos.copy(this.camTargetLook);
+			this.camLookReady = true;
+		}
 		this.camera.position.lerp(this.camTargetPos, 0.04);
-		this.camera.lookAt(0, 3, 0);
+		this.camLookPos.lerp(this.camTargetLook, 0.08);
+		this.camera.lookAt(this.camLookPos);
 	}
 
 	render() {

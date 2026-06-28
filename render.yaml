@@ -1,0 +1,21 @@
+# Render Blueprint — deploys the authoritative game server as a free Web Service.
+#
+# The static client is hosted separately (e.g. Cloudflare Pages) and points at this
+# service at build time via VITE_WS_URL (see README "Deploying").
+#
+# Free-tier behaviour: this service sleeps after ~15 min idle and cold-starts
+# (~30–60s) on the next connection. The client shows a loading/"waking" overlay to
+# cover that, and warms the dyno with a fetch on page load.
+services:
+  - type: web
+    name: gaffer-compression-server
+    runtime: node
+    plan: free
+    region: oregon
+    # The server runs through tsx (a devDependency) and Render sets
+    # NODE_ENV=production, which would otherwise skip devDependencies — so install
+    # them explicitly.
+    buildCommand: npm install --include=dev
+    startCommand: npx tsx src/server/index.ts
+    healthCheckPath: /
+    autoDeploy: true

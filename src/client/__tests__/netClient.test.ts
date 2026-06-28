@@ -101,3 +101,55 @@ test("client briefly extrapolates players but clamps boxes when snapshots are st
 
 	nowSpy.mockRestore();
 });
+
+test("an out-of-order older snapshot does not rewind the echoed input seq", () => {
+	const newer = fullSnapshot(10, 10, 42);
+	const older = fullSnapshot(8, 8, 7);
+	const client = new NetClient() as any;
+	client.send = () => undefined;
+
+	client.handlePacket(newer);
+	client.handlePacket(older);
+
+	expect(client.highestDecodedFrame).toBe(10);
+	expect(client.lastProcessedInputSeq).toBe(42); // not rewound to the older 7
+});
+
+test("pooled decode stays correct after the state pool wraps", () => {
+	const client = new NetClient() as any;
+	client.send = () => undefined;
+
+	// Decode well past STATE_POOL_SIZE so slots are recycled.
+	for (let f = 0; f < 130; f++) {
+		client.handlePacket(fullSnapshot(f, f)); // position.x encodes the frame
+	}
+
+	// Every still-buffered snapshot must hold its own frame's data — i.e. a
+	// recycled pool slot never clobbered a state still referenced by the buffer.
+	expect(client.snapshotBuffer.length).toBeGreaterThan(0);
+	for (const snap of client.snapshotBuffer) {
+		expect(snap.state[0].position.x).toBeCloseTo(snap.frame, 1);
+	}
+});
+
+test("the owned ball is rendered ahead of the delayed world", () => {
+	const nowSpy = jest.spyOn(performance, "now").mockReturnValue(100);
+	const client = new NetClient() as any;
+	client.playerBaseIndex = PLAYER_BASE_INDEX; // welcomed as slot 0
+	client.physicsDt = 50;
+	client.baseDelayFrames = 2;
+	client.delayFrames = 2;
+	client.lastSnapshotArrivalAt = 50; // now(100) − 50 = 50ms since the freshest snapshot
+	client.snapshotBuffer = [
+		{ frame: 0, state: stateWithBoxAndPlayer(0, 0) },
+		{ frame: 2, state: stateWithBoxAndPlayer(2, 2) },
+	];
+
+	const out = client.getInterpolatedState();
+	// The world (a box) renders at the delayed frame 0; the owned ball is led
+	// forward toward real time, past the newest snapshot's position.
+	expect(out[0].position.x).toBeCloseTo(0);
+	expect(out[PLAYER_BASE_INDEX].position.x).toBeGreaterThan(2);
+
+	nowSpy.mockRestore();
+});

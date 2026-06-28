@@ -65,7 +65,7 @@ export interface DecodedSnapshot {
 	state: NetworkBodyState[];
 }
 
-export function decodePacket(buffer: ArrayBuffer): DecodedSnapshot | { type: MsgType.Ack; frame: number } | { type: MsgType.Input; seq: number; move: { x: number; y: number; z: number } } | { type: MsgType.SetHz; physicsHz: number } | { type: MsgType.ResetBoxes } | null {
+export function decodePacket(buffer: ArrayBuffer, out?: NetworkBodyState[]): DecodedSnapshot | { type: MsgType.Ack; frame: number } | { type: MsgType.Input; seq: number; move: { x: number; y: number; z: number } } | { type: MsgType.SetHz; physicsHz: number } | { type: MsgType.ResetBoxes } | null {
 	const view = new DataView(buffer);
 	const type = view.getUint8(0) as MsgType;
 
@@ -73,7 +73,7 @@ export function decodePacket(buffer: ArrayBuffer): DecodedSnapshot | { type: Msg
 		const frame = view.getUint32(1, true);
 		const lastProcessedInputSeq = view.getUint16(5, true);
 		const payload = buffer.slice(FULL_HEADER_BYTES);
-		const state = getNetworkStateFromFullSnapshot(payload);
+		const state = getNetworkStateFromFullSnapshot(payload, out);
 		networkCache.networkStates[frame] = state;
 		return { type, frame, baseFrame: 0, lastProcessedInputSeq, state };
 	}
@@ -84,7 +84,7 @@ export function decodePacket(buffer: ArrayBuffer): DecodedSnapshot | { type: Msg
 		const baseFrame = view.getUint32(7, true);
 		if (!networkCache.networkStates[baseFrame]) return null;
 		const payload = buffer.slice(DELTA_HEADER_BYTES);
-		const state = getNetworkStateFromRelativeSnapshot(payload, baseFrame);
+		const state = getNetworkStateFromRelativeSnapshot(payload, baseFrame, out);
 		return { type, frame, baseFrame, lastProcessedInputSeq, state };
 	}
 

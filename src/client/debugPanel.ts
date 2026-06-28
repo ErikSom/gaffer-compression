@@ -22,6 +22,7 @@ export class DebugPanel {
 	public onChange: ((p: NetSimParams) => void) | null = null;
 	public onSetHz: ((hz: number) => void) | null = null;
 	public onReset: (() => void) | null = null;
+	public onGhostToggle: ((visible: boolean) => void) | null = null;
 	private visible = false;
 
 	constructor() {
@@ -53,6 +54,9 @@ export class DebugPanel {
 		}
 
 		document.getElementById("reset-boxes")?.addEventListener("click", () => this.onReset?.());
+		document.getElementById("show-ghost")?.addEventListener("change", (e) => {
+			this.onGhostToggle?.((e.target as HTMLInputElement).checked);
+		});
 
 		window.addEventListener("keydown", (e) => {
 			if (e.key === "F1") { e.preventDefault(); this.toggle(); }
